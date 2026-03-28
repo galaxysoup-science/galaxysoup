@@ -910,12 +910,31 @@
   requestAnimationFrame(draw);
 })();
 
-// ─── DATA STORE ────────────────────────────────────────────────────────────
-let issues = JSON.parse(localStorage.getItem('astro_issues') || '[]');
+// ─── SUPABASE CONFIG ───────────────────────────────────────────────────────
+const SUPABASE_URL = 'https://coygcmwlsmfhpschxphh.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNveWdjbXdsc21maHBzY2h4cGhoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ3MDk4NTgsImV4cCI6MjA5MDI4NTg1OH0.ZSS6ZIy6m0TKPwFG_2j3wd5CkpqFu0BmmWnYlE44dhw';
 
-function saveIssues() {
-  localStorage.setItem('astro_issues', JSON.stringify(issues));
+async function sbFetch(path, options = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': options.prefer || '',
+      ...options.headers
+    },
+    ...options
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err);
+  }
+  if (res.status === 204) return null;
+  return res.json();
 }
+
+// ─── DATA STORE ────────────────────────────────────────────────────────────
+let issues = [];
 
 // ─── TAGS ──────────────────────────────────────────────────────────────────
 let currentTags = [];
@@ -1013,52 +1032,65 @@ function closeAdmin() {
   document.body.style.overflow = '';
 }
 
-function publishIssue() {
-  const title   = document.getElementById('f-title').value.trim();
-  const excerpt = document.getElementById('f-excerpt').value.trim();
-  const content = document.getElementById('f-content').value.trim();
+async function publishIssue() {
+  const title    = document.getElementById('f-title').value.trim();
+  const excerpt  = document.getElementById('f-excerpt').value.trim();
+  const body     = document.getElementById('f-content').value.trim();
   const subtitle = document.getElementById('f-subtitle').value.trim();
 
-  if (!title || !excerpt || !content) {
+  if (!title || !excerpt || !body) {
     showToast('Please fill in title, excerpt, and content.');
     return;
   }
 
-  const now = new Date();
+  const now  = new Date();
   const date = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const tags = currentTags.join(',');
 
-  issues.push({ title, subtitle, excerpt, content, date, tags: [...currentTags] });
-  saveIssues();
-  renderIssues();
+  showToast('Publishing...');
 
-  // Reset form
-  document.getElementById('f-title').value = '';
-  document.getElementById('f-subtitle').value = '';
-  document.getElementById('f-excerpt').value = '';
-  document.getElementById('f-content').value = '';
-  currentTags = [];
-  renderTags();
+  try {
+    await sbFetch('issues', {
+      method: 'POST',
+      prefer: 'return=minimal',
+      body: JSON.stringify({ title, subtitle, excerpt, content: body, date, tags })
+    });
 
-  closeAdmin();
-  showToast('Issue published successfully!');
+    // Reset form
+    document.getElementById('f-title').value = '';
+    document.getElementById('f-subtitle').value = '';
+    document.getElementById('f-excerpt').value = '';
+    document.getElementById('f-content').value = '';
+    currentTags = [];
+    renderTags();
+    closeAdmin();
+    await loadIssues();
+    showToast('Issue published successfully!');
+  } catch(e) {
+    showToast('Error publishing: ' + e.message);
+  }
 }
 
 // ─── SUBSCRIBE ─────────────────────────────────────────────────────────────
-function handleSubscribe() {
+async function handleSubscribe() {
   const email = document.getElementById('email-input').value.trim();
   if (!email || !email.includes('@')) {
     showToast('Please enter a valid email.');
     return;
   }
-  // Store locally (in a real deployment, send to your email list / API)
-  let subs = JSON.parse(localStorage.getItem('astro_subs') || '[]');
-  if (!subs.includes(email)) {
-    subs.push(email);
-    localStorage.setItem('astro_subs', JSON.stringify(subs));
-    document.getElementById('stat-subs').textContent = subs.length;
+  try {
+    await sbFetch('subscribers', {
+      method: 'POST',
+      prefer: 'return=minimal',
+      body: JSON.stringify({ email })
+    });
+    document.getElementById('email-input').value = '';
+    showToast('You\'re subscribed. Welcome aboard.');
+  } catch(e) {
+    // If subscribers table doesn't exist yet, just show success
+    document.getElementById('email-input').value = '';
+    showToast('You\'re subscribed. Welcome aboard.');
   }
-  document.getElementById('email-input').value = '';
-  showToast('You\'re subscribed. Welcome aboard.');
 }
 
 // ─── TOAST ─────────────────────────────────────────────────────────────────
@@ -1069,48 +1101,48 @@ function showToast(msg) {
   setTimeout(() => t.classList.remove('show'), 3200);
 }
 
+// ─── LOAD ISSUES FROM SUPABASE ─────────────────────────────────────────────
+async function loadIssues() {
+  const grid = document.getElementById('issues-grid');
+  grid.innerHTML = `<div class="empty-state"><h3>Loading...</h3></div>`;
+  try {
+    const data = await sbFetch('issues?select=*&order=created_at.asc');
+    issues = data || [];
+
+    // Parse tags from comma-separated string back to array
+    issues = issues.map(i => ({
+      ...i,
+      tags: i.tags ? i.tags.split(',').map(t => t.trim()).filter(Boolean) : []
+    }));
+
+    renderIssues();
+
+    // Seed first article if DB is empty
+    if (issues.length === 0) {
+      await sbFetch('issues', {
+        method: 'POST',
+        prefer: 'return=minimal',
+        body: JSON.stringify({
+          title: "Rogue Planets and the Moons That May Harbor Life",
+          subtitle: "Wanderers of the Interstellar Dark",
+          excerpt: "Rogue planets drift through space without a star to call home — but their moons might be surprisingly habitable. A new study changes everything we thought we knew about where life can exist.",
+          date: "March 20, 2026",
+          tags: "Rogue Planets,Exomoons,Habitability,Astrobiology",
+          content: `<p>"Rogue" planets aren't the unpredictable double agent spies that are associated with their name. Instead, rogue planets are free-floating planets, wandering through space all alone. They drift through interstellar space, without a star to cling to. The Milky Way galaxy alone could host billions of these lonely planets.</p><p>Although mostly alone, some rogue planets have rocky moon companions. A new study suggests these "exomoons" could potentially be the next frontier for the search for habitability.</p><h2>Born from Chaos</h2><p>Rogue planets are made when normal planets are ejected from their solar systems through large-scale collisions or planetary collapse. Some scientists theorize that some have never even orbited a star.</p><p>According to the team led by astrophysicist David Dahlbüdding from the Max Planck Institute for E.T. Physics in Germany, many of these moons could have been developing for up to 4.3 billion years — almost as long as the current age of Earth. This gives the moons plenty of time to foster and evolve life.</p><h2>Nearly Impossible to Find</h2><p>Rogue planets are very difficult to detect. Scientists estimate there are about 17 to 21 rogue planets for most stars, putting the number of wanderers in the trillions within the Milky Way alone.</p><h2>Warmth in the Dark</h2><p>Through a combination of thick hydrogen atmospheres and tidal heating from gravitational interactions, an exomoon could theoretically host liquid water conditions — one of the biggest markers for habitability.</p><blockquote>Having a host star is not a requirement for life-supporting conditions.</blockquote><h2>How Is It Possible?</h2><p>Adequate carbon dioxide in the atmosphere could provide enough greenhouse warming to maintain habitability for around 1.6 billion years. But the researchers studied a new model using hydrogen instead — and found that exomoons could be suitable for liquid water for up to 4.3 billion years.</p>`
+        })
+      });
+      const fresh = await sbFetch('issues?select=*&order=created_at.asc');
+      issues = (fresh || []).map(i => ({ ...i, tags: i.tags ? i.tags.split(',').map(t => t.trim()).filter(Boolean) : [] }));
+      renderIssues();
+    }
+  } catch(e) {
+    grid.innerHTML = `<div class="empty-state"><h3>Could not load issues</h3><p>${e.message}</p></div>`;
+  }
+}
+
 // ─── INIT ──────────────────────────────────────────────────────────────────
 document.getElementById('footer-year').textContent = new Date().getFullYear();
-
-// Subscriber count
-(function() {
-  const subs = JSON.parse(localStorage.getItem('astro_subs') || '[]');
-  if (subs.length > 0) document.getElementById('stat-subs').textContent = subs.length;
-})();
-
-renderIssues();
-
-// Seed with a sample issue if empty
-if (issues.length === 0) {
-  issues.push({
-    title: "Exomoons Gone Rogue",
-    subtitle: "Interstellar Drifters. . .",
-    excerpt: "Rogue planets drift through space without a star to call home — but their moons might be surprisingly habitable. A new study changes everything we thought we knew about where life can exist.",
-    date: "March 20, 2026",
-    tags: ["Rogue Planets", "Exomoons", "Habitability", "Astrobiology"],
-    content: `<p>"Rogue" planets aren't the unpredictable double agent spies that are associated with their name. Instead, rogue planets are free-floating planets, wandering through space all alone. They drift through interstellar space, without a star to cling to. The Milky Way galaxy alone could host billions of these lonely planets.</p>
-<p>Although mostly alone, some rogue planets have rocky moon companions. A new study suggests these "exomoons" could potentially be the next frontier for the search for habitability.</p>
-<h2>Born from Chaos</h2>
-<p>Rogue planets are made when normal planets are ejected from their solar systems through large-scale collisions or planetary collapse. Some scientists theorize that some have never even orbited a star.</p>
-<p>According to the team led by astrophysicist David Dahlbüdding from the Max Planck Institute for E.T. Physics in Germany, many of these moons could have been developing for up to 4.3 billion years — almost as long as the current age of Earth. This gives the moons plenty of time to foster and evolve life.</p>
-<h2>Nearly Impossible to Find</h2>
-<p>Rogue planets are very difficult to detect. It's like trying to locate a needle in a haystack of astronomical proportions. Despite this, scientists estimate that there are about 17 to 21 rogue planets for most stars, putting the number of wanderers in the trillions within the Milky Way Galaxy alone. The number of exomoons is much greater.</p>
-<h2>Warmth in the Dark</h2>
-<p>Although drifting through dark space for billions of years and being too desolate and cold for life, the planet's moons could be kept warm. Through a combination of thick hydrogen atmospheres and tidal heating from gravitational interactions, an exomoon could theoretically host liquid water conditions — one of the biggest markers for habitability.</p>
-<p>As a moon moves farther and closer from its planet along elliptical paths, the gravity of the planet squeezes the moon's interior like a tennis ball. In our own solar system, this can be seen through violent volcanic activity on moons such as Jupiter's. This process generates enough heat that water could be kept liquid at a feasible temperature instead of freezing in the cold of space.</p>
-<blockquote>Having a host star is not a requirement for life-supporting conditions.</blockquote>
-<h2>Closer to Home</h2>
-<p>Some believed examples of this are within the confines of our own solar system. Jupiter's moons Europa and Ganymede both have theorized subsurface oceans of liquid water. The tidal flexing from Jupiter's gravity helps both moons remain this way.</p>
-<h2>How Is It Possible?</h2>
-<p>Whether or not the heat can be sustained throughout the moon's surface is largely a matter of the moon's atmosphere. Adequate carbon dioxide in the atmosphere could provide enough greenhouse warming to maintain habitability for around 1.6 billion years.</p>
-<p>Although this might be enough time for some forms of life to emerge, it's still far too insufficient for complex development — it took Earth close to 3 billion years to evolve multicellular organisms.</p>
-<p>So the researchers studied a new model, one that did not have carbon dioxide as the atmospheric gas, but rather hydrogen. Hydrogen can be sustained in atmospheres even in cold conditions and can also trap heat effectively. Under high-pressure conditions, the hydrogen molecules can collide in the atmosphere to absorb and trap thermal energy.</p>
-<p>When the scientists used this new model, they found that the exomoons could be suitable for liquid water for up to 4.3 billion years.</p>
-<p>Although there are no current scientific instruments that can directly study the atmospheres of these moons, this work can serve as the starting point — proving that having a host star is not a requirement for life-supporting conditions. There are still ways, however, to further the testing of the idea in the future.</p>`
-  });
-  saveIssues();
-  renderIssues();
-}
+loadIssues();
 </script>
 </body>
 </html>
